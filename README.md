@@ -14,10 +14,14 @@ The transfer pipeline has been hardened for desktop and mobile browsers.
 - Correct binary reconstruction and MIME types
 - Ordered, reliable WebRTC data channels
 - Mobile-safe backpressure and bounded send buffering
+- Sequential receive processing to preserve chunk order on Safari and mobile browsers
 - Queued ICE candidates during connection setup
-- Stable device identity across WebSocket reconnects
+- Session-scoped device identity across WebSocket reconnects without cross-tab collisions
 - Incoming request queue instead of overwritten prompts
 - Transfer request, connection, and inactivity timeouts
+- Timeout and failure cleanup that removes stale prompts on the other device
+- Expected-peer validation for offers, answers, ICE candidates, responses, cancellation, and completion
+- Graceful flushing of completion, cancellation, and error frames before peer channels close
 - Explicit failure reasons when a target disappears or signaling fails
 - Completion acknowledgements over the peer data channel
 - Clickable received files with separate **Open** and **Save** actions
@@ -37,7 +41,8 @@ The code now has stronger transport and state handling, but real-world browser b
 7. File bytes move directly over an ordered, reliable WebRTC data channel in 16 KB chunks.
 8. The sender applies backpressure when the browser's outbound buffer grows.
 9. The receiver validates the exact byte count, reconstructs the original MIME type, and acknowledges completion over the data channel.
-10. The completed receive entry becomes clickable so the file can be opened or saved.
+10. Terminal control frames are flushed before the connection is cleaned up.
+11. The completed receive entry becomes clickable so the file can be opened or saved.
 
 ## Features
 
@@ -58,11 +63,14 @@ The transfer implementation includes several safeguards aimed specifically at ph
 - send-buffer high/low water marks
 - sequential asynchronous receive processing
 - pending ICE-candidate queues
-- stable device IDs after signaling reconnects
-- peer-channel completion acknowledgements that do not depend on WebSocket continuity
+- session-scoped device IDs after signaling reconnects
+- peer-channel progress, completion, cancellation, and error messages
+- graceful terminal-message flushing before closing channels
+- expected-peer validation on signaling messages
 - connection-loss grace periods
 - stale WebSocket heartbeat cleanup
 - explicit transfer timeouts and errors
+- remote cleanup when requests time out or fail before acceptance
 
 ### Received files
 
@@ -165,8 +173,12 @@ WebSend relies on reliable, ordered SCTP delivery through WebRTC and adds applic
 - excess bytes fail the transfer
 - data-channel errors fail both the transfer state and connection
 - receiver progress and final completion use data-channel control messages
+- completion, cancellation, and error frames are flushed before cleanup
+- control frames must match the data channel's transfer ID
+- signaling messages must come from the expected peer for that transfer
 - ICE candidates received before a remote description are queued and replayed
 - unavailable targets generate an explicit signaling error
+- request timeouts notify the receiver so stale prompts disappear
 - cancelled transfers clean up buffers, timers, channels, and peer connections
 
 ## Known limitations
@@ -193,6 +205,7 @@ WebSend relies on reliable, ordered SCTP delivery through WebRTC and adds applic
 - Confirm the receiver still has the incoming-transfer prompt open.
 - Refresh both devices if either switched networks or slept.
 - Check that `/ws` is supported by the deployment.
+- Wait for the displayed timeout or failure reason; timed-out requests now clear the remote prompt automatically.
 
 ### A transfer fails on a phone
 
@@ -209,6 +222,6 @@ WebSend relies on reliable, ordered SCTP delivery through WebRTC and adds applic
 
 ## Repository status
 
-The latest reliability pass covers the complete transfer lifecycle: selection, request queuing, signaling, ICE setup, data-channel flow control, byte validation, completion acknowledgement, cancellation, reconnect behavior, stale-client cleanup, and receiver-side opening.
+The latest reliability pass covers the complete transfer lifecycle: selection, request queuing, signaling, expected-peer validation, ICE setup, data-channel flow control, byte validation, completion acknowledgement, graceful terminal-message delivery, cancellation, timeout cleanup, reconnect behavior, stale-client cleanup, and receiver-side opening.
 
-The remaining validation priority is a physical-device matrix, especially long transfers and sleep/background transitions on iOS and Android.
+The transfer hook passes a strict TypeScript check in a reconstructed validation workspace, and the committed file's Git blob hash matches the checked local artifact exactly. The remaining validation priority is a physical-device matrix, especially long transfers and sleep/background transitions on iOS and Android.
