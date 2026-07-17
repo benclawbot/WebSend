@@ -48,7 +48,7 @@ const MAX_INCOMING_QUEUE = 10;
 const isTerminal = (status: Transfer['status']) =>
   status === 'completed' || status === 'failed' || status === 'cancelled';
 
-const getStoredValue = (key: string) => {
+const getLocalValue = (key: string) => {
   try {
     return window.localStorage.getItem(key);
   } catch {
@@ -56,7 +56,7 @@ const getStoredValue = (key: string) => {
   }
 };
 
-const setStoredValue = (key: string, value: string) => {
+const setLocalValue = (key: string, value: string) => {
   try {
     window.localStorage.setItem(key, value);
   } catch {
@@ -64,10 +64,24 @@ const setStoredValue = (key: string, value: string) => {
   }
 };
 
-const createId = () => {
-  if (typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
+const getSessionValue = (key: string) => {
+  try {
+    return window.sessionStorage.getItem(key);
+  } catch {
+    return null;
   }
+};
+
+const setSessionValue = (key: string, value: string) => {
+  try {
+    window.sessionStorage.setItem(key, value);
+  } catch {
+    // Session storage can be unavailable in private browsing modes.
+  }
+};
+
+const createId = () => {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 };
 
@@ -94,8 +108,10 @@ export function useWebRTC() {
   const reconnectTimerRef = useRef<number | null>(null);
   const mountedRef = useRef(true);
   const messageHandlerRef = useRef<(message: SignalMessage) => Promise<void>>(async () => {});
-  const deviceIdRef = useRef(getStoredValue('websend-device-id') || createId());
-  const deviceNameRef = useRef(getStoredValue('websend-device-name') || `Device-${Math.floor(Math.random() * 10_000)}`);
+  const deviceIdRef = useRef(getSessionValue('websend-device-id') || createId());
+  const deviceNameRef = useRef(
+    getLocalValue('websend-device-name') || `Device-${Math.floor(Math.random() * 10_000)}`,
+  );
 
   const publishTransfers = (next: Record<string, Transfer>) => {
     transfersRef.current = next;
@@ -116,42 +132,15 @@ export function useWebRTC() {
 
   const clearTransferTimer = (transferId: string) => {
     const timer = transferTimersRef.current[transferId];
-    if (timer !== undefined) {
-      window.clearTimeout(timer);
-      delete transferTimersRef.current[transferId];
-      delete timeoutRefreshRef.current[transferId];
-    }
-  };
-
-  const scheduleTransferTimeout = (
-    transferId: string,
-    timeoutMs: number,
-    message: string,
-    force = false,
-  ) => {
-    const now = Date.now();
-    if (
-      !force &&
-      transferTimersRef.current[transferId] !== undefined &&
-      now - (timeoutRefreshRef.current[transferId] ?? 0) < 5_000
-    ) return;
-
-    clearTransferTimer(transferId);
-    timeoutRefreshRef.current[transferId] = now;
-    transferTimersRef.current[transferId] = window.setTimeout(() => {
-      const transfer = transfersRef.current[transferId];
-      if (transfer && !isTerminal(transfer.status)) {
-        failTransfer(transferId, message, false);
-      }
-    }, timeoutMs);
+    if (timer !== undefined) window.clearTimeout(timer);
+    delete transferTimersRef.current[transferId];
+    delete timeoutRefreshRef.current[transferId];
   };
 
   const clearDisconnectTimer = (transferId: string) => {
     const timer = disconnectTimersRef.current[transferId];
-    if (timer !== undefined) {
-      window.clearTimeout(timer);
-      delete disconnectTimersRef.current[transferId];
-    }
+    if (timer !== undefined) window.clearTimeout(timer);
+    delete disconnectTimersRef.current[transferId];
   };
 
   const clearReceiveState = (transferId: string) => {
@@ -186,57 +175,6 @@ export function useWebRTC() {
     delete pendingIceCandidatesRef.current[transferId];
   };
 
-  const failTransfer = (
-    transferId: string,
-    message: string,
-    notifyPeer = true,
-  ) => {
-    const transfer = transfersRef.current[transferId];
-    if (!transfer || isTerminal(transfer.status)) return;
-
-    patchTransfer(transferId, { status: 'failed', error: message });
-    clearTransferTimer(transferId);
-
-    const channel = dataChannelsRef.current[transferId];
-    if (notifyPeer && channel?.readyState === 'open') {
-      try {
-        channel.send(JSON.stringify({
-          websend: 1,
-          type: 'error',
-          transferId,
-          message,
-        } satisfies DataControlMessage));
-      } catch {
-        // The connection is already failing; cleanup below is authoritative.
-      }
-    }
-
-    closePeerConnection(transferId);
-    clearReceiveState(transferId);
-  };
-
-  const toArrayBuffer = async (data: IncomingChunk): Promise<ArrayBuffer> => {
-    if (data instanceof ArrayBuffer) return data;
-    if (data instanceof Blob) return data.arrayBuffer();
-    if (ArrayBuffer.isView(data)) {
-      return data.buffer.slice(
-        data.byteOffset,
-        data.byteOffset + data.byteLength,
-      ) as ArrayBuffer;
-    }
-    throw new TypeError('Unsupported WebRTC data channel payload');
-  };
-
-  const createDownloadUrl = (transfer: Transfer, chunks: ArrayBuffer[]) => {
-    if (transfer.downloadUrl) {
-      URL.revokeObjectURL(transfer.downloadUrl);
-    }
-    const blob = new Blob(chunks, {
-      type: transfer.fileType || 'application/octet-stream',
-    });
-    return URL.createObjectURL(blob);
-  };
-
   const sendSignal = (message: SignalMessage) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
@@ -264,96 +202,184 @@ export function useWebRTC() {
       if (channel.readyState !== 'open') {
         window.clearInterval(timer);
         reject(new Error('Data channel closed while waiting for backpressure'));
-        return;
-      }
-      if (channel.bufferedAmount <= maxBufferedAmount) {
+      } else if (channel.bufferedAmount <= maxBufferedAmount) {
         window.clearInterval(timer);
         resolve();
-        return;
-      }
-      if (Date.now() - startedAt >= timeoutMs) {
+      } else if (Date.now() - startedAt >= timeoutMs) {
         window.clearInterval(timer);
         reject(new Error('Timed out waiting for the data channel buffer to drain'));
       }
     }, 50);
   });
 
-  const parseDataControlMessage = (value: string): DataControlMessage | null => {
-    try {
-      const parsed = JSON.parse(value) as Partial<DataControlMessage>;
-      if (
-        parsed.websend === 1 &&
-        typeof parsed.type === 'string' &&
-        typeof parsed.transferId === 'string'
-      ) {
-        return parsed as DataControlMessage;
-      }
-    } catch {
-      // A string payload from another implementation is ignored safely.
-    }
-    return null;
-  };
-
-  const sendDataControl = (
-    channel: RTCDataChannel,
-    message: DataControlMessage,
-  ) => {
+  const sendDataControl = (channel: RTCDataChannel, message: DataControlMessage) => {
     if (channel.readyState !== 'open') return false;
     channel.send(JSON.stringify(message));
     return true;
   };
 
-  const handleDataControl = (
+  const sendTerminalControlAndClose = async (
+    transferId: string,
     channel: RTCDataChannel,
     message: DataControlMessage,
   ) => {
-    const transfer = transfersRef.current[message.transferId];
-    if (!transfer) return;
+    try {
+      sendDataControl(channel, message);
+      await waitForChannelDrain(channel, 0, 5_000);
+    } catch {
+      // Cleanup is still required if the channel closes while flushing.
+    } finally {
+      closePeerConnection(transferId);
+    }
+  };
 
-    if (message.type === 'progress' && transfer.direction === 'send') {
-      const progress = Math.max(0, Math.min(message.progress ?? 0, 99));
-      patchTransfer(message.transferId, { progress });
-      scheduleTransferTimeout(
-        message.transferId,
-        TRANSFER_TIMEOUT_MS,
-        'Transfer stalled before the receiver confirmed completion',
-      );
+  const isExpectedPeer = (transferId: string, from: unknown) => {
+    if (typeof from !== 'string') return false;
+    const transfer = transfersRef.current[transferId];
+    if (transfer) return transfer.targetPeerId === from;
+    return incomingQueueRef.current.some(
+      request => request.id === transferId && request.targetPeerId === from,
+    );
+  };
+
+  const failTransfer = (
+    transferId: string,
+    message: string,
+    notifyPeer = true,
+  ) => {
+    const transfer = transfersRef.current[transferId];
+    if (!transfer || isTerminal(transfer.status)) return;
+
+    patchTransfer(transferId, { status: 'failed', error: message });
+    clearTransferTimer(transferId);
+    clearReceiveState(transferId);
+
+    const channel = dataChannelsRef.current[transferId];
+    if (notifyPeer && channel?.readyState === 'open') {
+      void sendTerminalControlAndClose(transferId, channel, {
+        websend: 1,
+        type: 'error',
+        transferId,
+        message,
+      });
       return;
     }
 
-    if (message.type === 'complete' && transfer.direction === 'send') {
-      patchTransfer(message.transferId, {
+    if (notifyPeer) {
+      sendSignal({
+        type: 'transfer-error',
+        target: transfer.targetPeerId,
+        transferId,
+        reason: message,
+      });
+    }
+    closePeerConnection(transferId);
+  };
+
+  const scheduleTransferTimeout = (
+    transferId: string,
+    timeoutMs: number,
+    message: string,
+    force = false,
+  ) => {
+    const now = Date.now();
+    if (
+      !force &&
+      transferTimersRef.current[transferId] !== undefined &&
+      now - (timeoutRefreshRef.current[transferId] ?? 0) < 5_000
+    ) return;
+
+    clearTransferTimer(transferId);
+    timeoutRefreshRef.current[transferId] = now;
+    transferTimersRef.current[transferId] = window.setTimeout(() => {
+      const transfer = transfersRef.current[transferId];
+      if (transfer && !isTerminal(transfer.status)) failTransfer(transferId, message, true);
+    }, timeoutMs);
+  };
+
+  const toArrayBuffer = async (data: IncomingChunk): Promise<ArrayBuffer> => {
+    if (data instanceof ArrayBuffer) return data;
+    if (data instanceof Blob) return data.arrayBuffer();
+    if (ArrayBuffer.isView(data)) {
+      return data.buffer.slice(
+        data.byteOffset,
+        data.byteOffset + data.byteLength,
+      ) as ArrayBuffer;
+    }
+    throw new TypeError('Unsupported WebRTC data channel payload');
+  };
+
+  const createDownloadUrl = (transfer: Transfer, chunks: ArrayBuffer[]) => {
+    if (transfer.downloadUrl) URL.revokeObjectURL(transfer.downloadUrl);
+    const blob = new Blob(chunks, {
+      type: transfer.fileType || 'application/octet-stream',
+    });
+    return URL.createObjectURL(blob);
+  };
+
+  const parseDataControlMessage = (value: string): DataControlMessage | null => {
+    try {
+      const parsed = JSON.parse(value) as Partial<DataControlMessage>;
+      if (
+        parsed.websend === 1 &&
+        (parsed.type === 'progress' ||
+          parsed.type === 'complete' ||
+          parsed.type === 'cancel' ||
+          parsed.type === 'error') &&
+        typeof parsed.transferId === 'string'
+      ) return parsed as DataControlMessage;
+    } catch {
+      // Unknown string payloads are ignored safely.
+    }
+    return null;
+  };
+
+  const handleDataControl = (
+    expectedTransferId: string,
+    channel: RTCDataChannel,
+    message: DataControlMessage,
+  ) => {
+    if (message.transferId !== expectedTransferId) {
+      failTransfer(expectedTransferId, 'Received a control frame for the wrong transfer');
+      return;
+    }
+
+    const transfer = transfersRef.current[expectedTransferId];
+    if (!transfer) return;
+
+    if (message.type === 'progress' && transfer.direction === 'send') {
+      patchTransfer(expectedTransferId, {
+        progress: Math.max(0, Math.min(message.progress ?? 0, 99)),
+      });
+      scheduleTransferTimeout(
+        expectedTransferId,
+        TRANSFER_TIMEOUT_MS,
+        'Transfer stalled before the receiver confirmed completion',
+      );
+    } else if (message.type === 'complete' && transfer.direction === 'send') {
+      patchTransfer(expectedTransferId, {
         status: 'completed',
         progress: 100,
         error: undefined,
       });
-      clearTransferTimer(message.transferId);
-      window.setTimeout(() => closePeerConnection(message.transferId), 150);
-      return;
-    }
-
-    if (message.type === 'cancel') {
-      patchTransfer(message.transferId, {
+      clearTransferTimer(expectedTransferId);
+      window.setTimeout(() => closePeerConnection(expectedTransferId), 150);
+    } else if (message.type === 'cancel') {
+      patchTransfer(expectedTransferId, {
         status: 'cancelled',
         error: 'Cancelled by the other device',
       });
-      clearTransferTimer(message.transferId);
-      closePeerConnection(message.transferId);
-      clearReceiveState(message.transferId);
-      return;
-    }
-
-    if (message.type === 'error') {
+      clearTransferTimer(expectedTransferId);
+      closePeerConnection(expectedTransferId);
+      clearReceiveState(expectedTransferId);
+    } else if (message.type === 'error') {
       failTransfer(
-        message.transferId,
+        expectedTransferId,
         message.message || 'The other device reported a transfer error',
         false,
       );
-      return;
-    }
-
-    if (channel.readyState !== 'open') {
-      failTransfer(message.transferId, 'Data channel closed unexpectedly', false);
+    } else if (channel.readyState !== 'open') {
+      failTransfer(expectedTransferId, 'Data channel closed unexpectedly', false);
     }
   };
 
@@ -371,24 +397,15 @@ export function useWebRTC() {
     });
     clearTransferTimer(transfer.id);
     clearReceiveState(transfer.id);
-
-    sendDataControl(channel, {
+    await sendTerminalControlAndClose(transfer.id, channel, {
       websend: 1,
       type: 'complete',
       transferId: transfer.id,
     });
-
-    try {
-      await waitForChannelDrain(channel, 0, 5_000);
-    } catch {
-      // The completion frame was queued before this wait; cleanup can continue.
-    }
-    window.setTimeout(() => closePeerConnection(transfer.id), 150);
   };
 
   const handleBinaryChunk = async (
     transferId: string,
-    targetPeerId: string,
     channel: RTCDataChannel,
     data: IncomingChunk,
   ) => {
@@ -441,7 +458,6 @@ export function useWebRTC() {
   const setupDataChannel = (
     channel: RTCDataChannel,
     transferId: string,
-    targetPeerId: string,
   ) => {
     channel.binaryType = 'arraybuffer';
     channel.bufferedAmountLowThreshold = LOW_WATER_MARK;
@@ -451,15 +467,10 @@ export function useWebRTC() {
       const next = previous.then(async () => {
         if (typeof event.data === 'string') {
           const control = parseDataControlMessage(event.data);
-          if (control) handleDataControl(channel, control);
+          if (control) handleDataControl(transferId, channel, control);
           return;
         }
-        await handleBinaryChunk(
-          transferId,
-          targetPeerId,
-          channel,
-          event.data as IncomingChunk,
-        );
+        await handleBinaryChunk(transferId, channel, event.data as IncomingChunk);
       });
 
       receiveChainsRef.current[transferId] = next.catch(error => {
@@ -515,7 +526,7 @@ export function useWebRTC() {
     };
 
     connection.ondatachannel = event => {
-      setupDataChannel(event.channel, transferId, targetPeerId);
+      setupDataChannel(event.channel, transferId);
     };
 
     const updateConnectionHealth = () => {
@@ -553,17 +564,16 @@ export function useWebRTC() {
   const handleOffer = async (message: SignalMessage) => {
     if (
       typeof message.transferId !== 'string' ||
-      typeof message.from !== 'string' ||
+      !isExpectedPeer(message.transferId, message.from) ||
       !message.offer
     ) return;
 
-    const connection = createPeerConnection(message.transferId, message.from);
+    const connection = createPeerConnection(message.transferId, message.from as string);
     try {
       await connection.setRemoteDescription(message.offer as RTCSessionDescriptionInit);
       await flushPendingIceCandidates(message.transferId);
       const answer = await connection.createAnswer();
       await connection.setLocalDescription(answer);
-
       if (!sendSignal({
         type: 'answer',
         target: message.from,
@@ -581,7 +591,11 @@ export function useWebRTC() {
   };
 
   const handleAnswer = async (message: SignalMessage) => {
-    if (typeof message.transferId !== 'string' || !message.answer) return;
+    if (
+      typeof message.transferId !== 'string' ||
+      !isExpectedPeer(message.transferId, message.from) ||
+      !message.answer
+    ) return;
     const connection = peerConnectionsRef.current[message.transferId];
     if (!connection) return;
 
@@ -597,10 +611,14 @@ export function useWebRTC() {
   };
 
   const handleIceCandidate = async (message: SignalMessage) => {
-    if (typeof message.transferId !== 'string' || !message.candidate) return;
+    if (
+      typeof message.transferId !== 'string' ||
+      !isExpectedPeer(message.transferId, message.from) ||
+      !message.candidate
+    ) return;
+
     const candidate = message.candidate as RTCIceCandidateInit;
     const connection = peerConnectionsRef.current[message.transferId];
-
     if (!connection || !connection.remoteDescription) {
       const pending = pendingIceCandidatesRef.current[message.transferId] ?? [];
       pending.push(candidate);
@@ -629,6 +647,11 @@ export function useWebRTC() {
     showNextIncomingRequest();
   };
 
+  const clearIncomingQueue = () => {
+    incomingQueueRef.current = [];
+    setIncomingRequest(null);
+  };
+
   const handleTransferRequest = (message: SignalMessage) => {
     if (
       typeof message.transferId !== 'string' ||
@@ -641,7 +664,6 @@ export function useWebRTC() {
     ) return;
 
     if (incomingQueueRef.current.some(request => request.id === message.transferId)) return;
-
     if (incomingQueueRef.current.length >= MAX_INCOMING_QUEUE) {
       sendSignal({
         type: 'transfer-response',
@@ -666,7 +688,6 @@ export function useWebRTC() {
       direction: 'receive',
       targetPeerId: message.from,
     };
-
     incomingQueueRef.current = [...incomingQueueRef.current, request];
     showNextIncomingRequest();
   };
@@ -690,16 +711,14 @@ export function useWebRTC() {
     };
     addTransfer(transfer);
 
-    const sent = sendSignal({
+    if (!sendSignal({
       type: 'transfer-request',
       target: targetPeerId,
       transferId,
       fileName: transfer.fileName,
       fileSize: transfer.fileSize,
       fileType: transfer.fileType,
-    });
-
-    if (!sent) {
+    })) {
       failTransfer(transferId, 'Unable to send the transfer request', false);
       throw new Error('Unable to send the transfer request');
     }
@@ -722,11 +741,10 @@ export function useWebRTC() {
     addTransfer({ ...request, status: 'transferring' });
 
     if (request.fileSize === 0) {
-      const downloadUrl = createDownloadUrl(request, []);
       patchTransfer(transferId, {
         status: 'completed',
         progress: 100,
-        downloadUrl,
+        downloadUrl: createDownloadUrl(request, []),
       });
     } else {
       scheduleTransferTimeout(
@@ -780,17 +798,15 @@ export function useWebRTC() {
         if (channel.readyState !== 'open') {
           throw new Error('Data channel closed before the file finished sending');
         }
-        if (channel.bufferedAmount > HIGH_WATER_MARK) {
-          await waitForChannelDrain(channel);
-        }
+        if (channel.bufferedAmount > HIGH_WATER_MARK) await waitForChannelDrain(channel);
 
         const end = Math.min(offset + CHUNK_SIZE, file.size);
         const chunk = await file.slice(offset, end).arrayBuffer();
         channel.send(chunk);
         offset += chunk.byteLength;
-
-        const queuedProgress = Math.round((offset / file.size) * 100);
-        patchTransfer(transferId, { progress: Math.min(queuedProgress, 99) });
+        patchTransfer(transferId, {
+          progress: Math.min(Math.round((offset / file.size) * 100), 99),
+        });
         scheduleTransferTimeout(
           transferId,
           TRANSFER_TIMEOUT_MS,
@@ -808,18 +824,17 @@ export function useWebRTC() {
   const handleTransferResponse = async (message: SignalMessage) => {
     if (
       typeof message.transferId !== 'string' ||
-      typeof message.from !== 'string' ||
+      !isExpectedPeer(message.transferId, message.from) ||
       typeof message.accepted !== 'boolean'
     ) return;
 
     const transferId = message.transferId;
-    const senderId = message.from;
     const transfer = transfersRef.current[transferId];
     if (!transfer || transfer.direction !== 'send') return;
     clearTransferTimer(transferId);
 
     if (!message.accepted) {
-      patchTransfer(message.transferId, {
+      patchTransfer(transferId, {
         status: 'cancelled',
         error: typeof message.reason === 'string' ? message.reason : 'Declined by receiver',
       });
@@ -832,19 +847,18 @@ export function useWebRTC() {
     }
 
     patchTransfer(transferId, { status: 'transferring', error: undefined });
-    const connection = createPeerConnection(transferId, senderId);
+    const remotePeerId = message.from as string;
+    const connection = createPeerConnection(transferId, remotePeerId);
     const channel = connection.createDataChannel('fileTransfer', { ordered: true });
-    setupDataChannel(channel, transferId, senderId);
-    channel.onopen = () => {
-      void sendFileChunks(transfer.file as File, channel, transferId);
-    };
+    setupDataChannel(channel, transferId);
+    channel.onopen = () => void sendFileChunks(transfer.file as File, channel, transferId);
 
     try {
       const offer = await connection.createOffer();
       await connection.setLocalDescription(offer);
       if (!sendSignal({
         type: 'offer',
-        target: senderId,
+        target: remotePeerId,
         transferId,
         offer,
       })) {
@@ -862,9 +876,13 @@ export function useWebRTC() {
     const transfer = transfersRef.current[transferId];
     if (!transfer || isTerminal(transfer.status)) return;
 
+    patchTransfer(transferId, { status: 'cancelled', error: 'Cancelled' });
+    clearTransferTimer(transferId);
+    clearReceiveState(transferId);
+
     const channel = dataChannelsRef.current[transferId];
     if (channel?.readyState === 'open') {
-      sendDataControl(channel, {
+      void sendTerminalControlAndClose(transferId, channel, {
         websend: 1,
         type: 'cancel',
         transferId,
@@ -875,15 +893,21 @@ export function useWebRTC() {
         target: transfer.targetPeerId,
         transferId,
       });
+      closePeerConnection(transferId);
     }
-
-    patchTransfer(transferId, { status: 'cancelled', error: 'Cancelled' });
-    clearTransferTimer(transferId);
-    closePeerConnection(transferId);
-    clearReceiveState(transferId);
   };
 
-  const handleRemoteCancel = (transferId: string) => {
+  const handleRemoteTerminal = (
+    message: SignalMessage,
+    status: 'cancelled' | 'failed',
+    fallbackReason: string,
+  ) => {
+    if (
+      typeof message.transferId !== 'string' ||
+      !isExpectedPeer(message.transferId, message.from)
+    ) return;
+
+    const transferId = message.transferId;
     if (incomingQueueRef.current.some(request => request.id === transferId)) {
       removeIncomingRequest(transferId);
     }
@@ -891,20 +915,24 @@ export function useWebRTC() {
     const transfer = transfersRef.current[transferId];
     if (!transfer || isTerminal(transfer.status)) return;
     patchTransfer(transferId, {
-      status: 'cancelled',
-      error: 'Cancelled by the other device',
+      status,
+      error: typeof message.reason === 'string' ? message.reason : fallbackReason,
     });
     clearTransferTimer(transferId);
     closePeerConnection(transferId);
     clearReceiveState(transferId);
   };
 
-  const completeTransferLegacy = (transferId: string) => {
-    const transfer = transfersRef.current[transferId];
+  const completeTransferLegacy = (message: SignalMessage) => {
+    if (
+      typeof message.transferId !== 'string' ||
+      !isExpectedPeer(message.transferId, message.from)
+    ) return;
+    const transfer = transfersRef.current[message.transferId];
     if (!transfer || isTerminal(transfer.status)) return;
-    patchTransfer(transferId, { status: 'completed', progress: 100 });
-    clearTransferTimer(transferId);
-    closePeerConnection(transferId);
+    patchTransfer(message.transferId, { status: 'completed', progress: 100 });
+    clearTransferTimer(message.transferId);
+    closePeerConnection(message.transferId);
   };
 
   messageHandlerRef.current = async message => {
@@ -931,10 +959,13 @@ export function useWebRTC() {
         await handleTransferResponse(message);
         break;
       case 'transfer-complete':
-        if (typeof message.transferId === 'string') completeTransferLegacy(message.transferId);
+        completeTransferLegacy(message);
         break;
       case 'transfer-cancel':
-        if (typeof message.transferId === 'string') handleRemoteCancel(message.transferId);
+        handleRemoteTerminal(message, 'cancelled', 'Cancelled by the other device');
+        break;
+      case 'transfer-error':
+        handleRemoteTerminal(message, 'failed', 'The other device reported a transfer error');
         break;
       case 'delivery-error':
         if (typeof message.transferId === 'string') {
@@ -966,8 +997,8 @@ export function useWebRTC() {
 
     ws.addEventListener('open', () => {
       if (wsRef.current !== ws) return;
-      setStoredValue('websend-device-id', deviceIdRef.current);
-      setStoredValue('websend-device-name', deviceNameRef.current);
+      setSessionValue('websend-device-id', deviceIdRef.current);
+      setLocalValue('websend-device-name', deviceNameRef.current);
       setMyName(deviceNameRef.current);
       ws.send(JSON.stringify({
         type: 'update-info',
@@ -979,16 +1010,17 @@ export function useWebRTC() {
     ws.addEventListener('message', event => {
       if (wsRef.current !== ws || typeof event.data !== 'string') return;
       try {
-        const message = JSON.parse(event.data) as SignalMessage;
-        void messageHandlerRef.current(message);
+        void messageHandlerRef.current(JSON.parse(event.data) as SignalMessage);
       } catch (error) {
         console.error('Unable to parse signaling message', error);
       }
     });
 
     ws.addEventListener('close', () => {
-      if (wsRef.current === ws) wsRef.current = null;
+      if (wsRef.current !== ws) return;
+      wsRef.current = null;
       setPeers([]);
+      clearIncomingQueue();
 
       for (const transfer of Object.values(transfersRef.current)) {
         if (transfer.status === 'pending' && !peerConnectionsRef.current[transfer.id]) {
@@ -997,6 +1029,9 @@ export function useWebRTC() {
       }
 
       if (mountedRef.current) {
+        if (reconnectTimerRef.current !== null) {
+          window.clearTimeout(reconnectTimerRef.current);
+        }
         reconnectTimerRef.current = window.setTimeout(connectWebSocket, 3_000);
       }
     });
@@ -1043,7 +1078,7 @@ export function useWebRTC() {
     const trimmed = name.trim();
     if (!trimmed) return;
     deviceNameRef.current = trimmed;
-    setStoredValue('websend-device-name', trimmed);
+    setLocalValue('websend-device-name', trimmed);
     setMyName(trimmed);
     sendSignal({
       type: 'update-info',
@@ -1057,7 +1092,7 @@ export function useWebRTC() {
     myId,
     myName,
     updateMyInfo,
-    transfers: Object.values(transfersRef.current),
+    transfers: Object.values(transfers),
     incomingRequest,
     sendFile,
     acceptTransfer,
