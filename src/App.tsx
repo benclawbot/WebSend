@@ -1,9 +1,11 @@
-import React, { useRef, useState } from 'react';
+import React, { type ChangeEvent, useRef, useState } from 'react';
 import { useWebRTC } from './hooks/useWebRTC';
 import { BrowserFile, createTarArchive } from './utils/createTarArchive';
 import {
   Check,
+  Download,
   Edit2,
+  ExternalLink,
   FileDown,
   Files,
   FileUp,
@@ -34,8 +36,8 @@ export default function App() {
   const [selectedPeer, setSelectedPeer] = useState<string | null>(null);
   const [isPreparingSelection, setIsPreparingSelection] = useState(false);
   const [selectionError, setSelectionError] = useState<string | null>(null);
-  const filesInputRef = useRef<HTMLInputElement>(null);
-  const folderInputRef = useRef<HTMLInputElement>(null);
+  const filesInputRef = useRef<HTMLInputElement | null>(null);
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
 
   const handleEditName = () => {
     setEditNameValue(myName);
@@ -43,9 +45,7 @@ export default function App() {
   };
 
   const saveName = () => {
-    if (editNameValue.trim()) {
-      updateMyInfo(editNameValue.trim());
-    }
+    if (editNameValue.trim()) updateMyInfo(editNameValue.trim());
     setIsEditingName(false);
   };
 
@@ -54,21 +54,16 @@ export default function App() {
     setSelectedPeer(peerId);
   };
 
-  const resetFileInput = (input: HTMLInputElement) => {
-    input.value = '';
-  };
-
   const handleSelectionChange = async (
-    event: React.ChangeEvent<HTMLInputElement>,
+    event: ChangeEvent<HTMLInputElement>,
     isFolder: boolean,
   ) => {
     const input = event.currentTarget;
     const selectedFiles = Array.from(input.files ?? []) as BrowserFile[];
     const targetPeerId = selectedPeer;
+    input.value = '';
 
-    resetFileInput(input);
     if (!targetPeerId || selectedFiles.length === 0) return;
-
     setSelectionError(null);
     setIsPreparingSelection(true);
 
@@ -83,7 +78,6 @@ export default function App() {
         const archive = await createTarArchive(selectedFiles, archiveName);
         await sendFile(archive, targetPeerId);
       }
-
       setSelectedPeer(null);
     } catch (error) {
       console.error('Unable to prepare selected files', error);
@@ -214,7 +208,20 @@ export default function App() {
 
                     <div className="flex-1 min-w-0">
                       <div className="flex justify-between items-baseline mb-1">
-                        <h4 className="text-sm font-medium text-neutral-900 truncate pr-4">{transfer.fileName}</h4>
+                        {transfer.downloadUrl ? (
+                          <a
+                            href={transfer.downloadUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-sm font-medium text-indigo-700 hover:text-indigo-800 hover:underline truncate pr-4 flex items-center gap-1.5"
+                            title={`Open ${transfer.fileName}`}
+                          >
+                            <span className="truncate">{transfer.fileName}</span>
+                            <ExternalLink size={13} className="shrink-0" />
+                          </a>
+                        ) : (
+                          <h4 className="text-sm font-medium text-neutral-900 truncate pr-4">{transfer.fileName}</h4>
+                        )}
                         <span className="text-xs text-neutral-500 shrink-0">{formatBytes(transfer.fileSize)}</span>
                       </div>
 
@@ -233,16 +240,40 @@ export default function App() {
                         </span>
                       </div>
 
-                      <div className="text-xs text-neutral-500 mt-1 capitalize flex items-center gap-1">
+                      <div className="text-xs text-neutral-500 mt-1 flex items-center gap-1">
                         {transfer.status === 'pending' && <span className="text-amber-600">Waiting for response...</span>}
                         {transfer.status === 'transferring' && <span className="text-indigo-600">Transferring...</span>}
-                        {transfer.status === 'completed' && <span className="text-emerald-600">Completed</span>}
-                        {transfer.status === 'failed' && <span className="text-red-600">Failed</span>}
-                        {transfer.status === 'cancelled' && <span className="text-red-600">Cancelled</span>}
+                        {transfer.status === 'completed' && transfer.downloadUrl && <span className="text-emerald-600">Ready to open</span>}
+                        {transfer.status === 'completed' && !transfer.downloadUrl && <span className="text-emerald-600">Completed</span>}
+                        {transfer.status === 'failed' && <span className="text-red-600">Failed{transfer.error ? `: ${transfer.error}` : ''}</span>}
+                        {transfer.status === 'cancelled' && <span className="text-red-600">Cancelled{transfer.error ? `: ${transfer.error}` : ''}</span>}
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2 ml-4">
+                    <div className="flex items-center gap-2 ml-2">
+                      {transfer.downloadUrl && (
+                        <>
+                          <a
+                            href={transfer.downloadUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="p-1.5 text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 rounded-md transition-colors"
+                            title="Open file"
+                            aria-label={`Open ${transfer.fileName}`}
+                          >
+                            <ExternalLink size={18} />
+                          </a>
+                          <a
+                            href={transfer.downloadUrl}
+                            download={transfer.fileName}
+                            className="p-1.5 text-neutral-500 hover:text-neutral-700 hover:bg-neutral-100 rounded-md transition-colors"
+                            title="Save file"
+                            aria-label={`Save ${transfer.fileName}`}
+                          >
+                            <Download size={18} />
+                          </a>
+                        </>
+                      )}
                       {(transfer.status === 'pending' || transfer.status === 'transferring') && (
                         <button
                           onClick={() => cancelTransfer(transfer.id)}
@@ -307,7 +338,7 @@ export default function App() {
               <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-8 text-center">
                 <Loader2 className="animate-spin mx-auto mb-3 text-indigo-600" size={28} />
                 <div className="font-medium">Preparing archive...</div>
-                <p className="text-sm text-neutral-500 mt-1">Large folders may take a moment to package.</p>
+                <p className="text-sm text-neutral-500 mt-1">Folder structure is preserved without loading every file into memory.</p>
               </div>
             ) : (
               <div className="grid sm:grid-cols-2 gap-3">
@@ -339,7 +370,7 @@ export default function App() {
             <div className="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-full flex items-center justify-center mx-auto mb-4">
               <FileDown size={32} />
             </div>
-            <h3 className="text-xl font-semibold text-center mb-2">Incoming File</h3>
+            <h3 className="text-xl font-semibold text-center mb-2">Incoming transfer</h3>
             <p className="text-center text-neutral-600 mb-6 text-sm">
               <span className="font-medium text-neutral-900">{peers.find(peer => peer.id === incomingRequest.targetPeerId)?.name || 'Someone'}</span> wants to send you:
             </p>
@@ -362,7 +393,7 @@ export default function App() {
                 <X size={18} /> Decline
               </button>
               <button
-                onClick={() => acceptTransfer(incomingRequest.id)}
+                onClick={() => void acceptTransfer(incomingRequest.id)}
                 className="flex-1 py-2.5 px-4 rounded-xl bg-indigo-600 text-white font-medium hover:bg-indigo-700 transition-colors flex items-center justify-center gap-2 shadow-sm shadow-indigo-200"
               >
                 <Check size={18} /> Accept
