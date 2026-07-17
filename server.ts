@@ -25,6 +25,7 @@ const FORWARDED_TYPES = new Set([
   'transfer-progress',
   'transfer-complete',
   'transfer-cancel',
+  'transfer-error',
 ]);
 const DELIVERY_ERROR_TYPES = new Set([
   'offer',
@@ -33,6 +34,7 @@ const DELIVERY_ERROR_TYPES = new Set([
   'transfer-response',
   'transfer-complete',
   'transfer-cancel',
+  'transfer-error',
 ]);
 
 const isValidDeviceId = (value: string | null) =>
