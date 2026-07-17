@@ -1,11 +1,23 @@
 import React, { useRef, useState } from 'react';
-import { useWebRTC, Peer, Transfer } from './hooks/useWebRTC';
-import { Monitor, Smartphone, FileUp, FileDown, Check, X, Edit2, Loader2, Wifi } from 'lucide-react';
+import { useWebRTC } from './hooks/useWebRTC';
+import { BrowserFile, createTarArchive } from './utils/createTarArchive';
+import {
+  Check,
+  Edit2,
+  FileDown,
+  Files,
+  FileUp,
+  FolderUp,
+  Loader2,
+  Monitor,
+  Smartphone,
+  Wifi,
+  X,
+} from 'lucide-react';
 
 export default function App() {
   const {
     peers,
-    myId,
     myName,
     updateMyInfo,
     transfers,
@@ -14,13 +26,16 @@ export default function App() {
     acceptTransfer,
     rejectTransfer,
     cancelTransfer,
-    removeTransfer
+    removeTransfer,
   } = useWebRTC();
 
   const [isEditingName, setIsEditingName] = useState(false);
   const [editNameValue, setEditNameValue] = useState('');
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const [selectedPeer, setSelectedPeer] = useState<string | null>(null);
+  const [isPreparingSelection, setIsPreparingSelection] = useState(false);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
+  const filesInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   const handleEditName = () => {
     setEditNameValue(myName);
@@ -35,19 +50,56 @@ export default function App() {
   };
 
   const handlePeerClick = (peerId: string) => {
+    setSelectionError(null);
     setSelectedPeer(peerId);
-    fileInputRef.current?.click();
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file && selectedPeer) {
-      sendFile(file, selectedPeer);
+  const resetFileInput = (input: HTMLInputElement) => {
+    input.value = '';
+  };
+
+  const handleSelectionChange = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+    isFolder: boolean,
+  ) => {
+    const input = event.currentTarget;
+    const selectedFiles = Array.from(input.files ?? []) as BrowserFile[];
+    const targetPeerId = selectedPeer;
+
+    resetFileInput(input);
+    if (!targetPeerId || selectedFiles.length === 0) return;
+
+    setSelectionError(null);
+    setIsPreparingSelection(true);
+
+    try {
+      if (!isFolder && selectedFiles.length === 1) {
+        await sendFile(selectedFiles[0], targetPeerId);
+      } else {
+        const rootFolder = selectedFiles[0]?.webkitRelativePath?.split('/')[0];
+        const archiveName = isFolder && rootFolder
+          ? rootFolder
+          : `websend-files-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+        const archive = await createTarArchive(selectedFiles, archiveName);
+        await sendFile(archive, targetPeerId);
+      }
+
+      setSelectedPeer(null);
+    } catch (error) {
+      console.error('Unable to prepare selected files', error);
+      setSelectionError(
+        error instanceof Error ? error.message : 'Unable to prepare the selected files',
+      );
+    } finally {
+      setIsPreparingSelection(false);
     }
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
-    setSelectedPeer(null);
+  };
+
+  const configureFolderInput = (input: HTMLInputElement | null) => {
+    folderInputRef.current = input;
+    if (!input) return;
+    input.setAttribute('webkitdirectory', '');
+    input.setAttribute('directory', '');
   };
 
   const formatBytes = (bytes: number, decimals = 2) => {
@@ -59,9 +111,10 @@ export default function App() {
     return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
   };
 
+  const selectedPeerName = peers.find(peer => peer.id === selectedPeer)?.name;
+
   return (
     <div className="min-h-screen bg-neutral-50 text-neutral-900 font-sans selection:bg-indigo-100 selection:text-indigo-900">
-      {/* Header */}
       <header className="bg-white border-b border-neutral-200 sticky top-0 z-10">
         <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -70,7 +123,7 @@ export default function App() {
             </div>
             <h1 className="text-xl font-semibold tracking-tight">WebSend</h1>
           </div>
-          
+
           <div className="flex items-center gap-3 text-sm">
             <span className="text-neutral-500 hidden sm:inline-block">My Device:</span>
             {isEditingName ? (
@@ -78,8 +131,8 @@ export default function App() {
                 <input
                   type="text"
                   value={editNameValue}
-                  onChange={(e) => setEditNameValue(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && saveName()}
+                  onChange={event => setEditNameValue(event.target.value)}
+                  onKeyDown={event => event.key === 'Enter' && saveName()}
                   className="px-2 py-1 border border-neutral-300 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm w-32 sm:w-48"
                   autoFocus
                 />
@@ -100,8 +153,15 @@ export default function App() {
       </header>
 
       <main className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
-        
-        {/* Nearby Devices */}
+        {selectionError && (
+          <div className="flex items-start justify-between gap-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            <span>{selectionError}</span>
+            <button onClick={() => setSelectionError(null)} aria-label="Dismiss error">
+              <X size={16} />
+            </button>
+          </div>
+        )}
+
         <section>
           <h2 className="text-lg font-medium mb-4 flex items-center gap-2">
             Nearby Devices
@@ -109,7 +169,7 @@ export default function App() {
               {peers.length}
             </span>
           </h2>
-          
+
           {peers.length === 0 ? (
             <div className="bg-white border border-neutral-200 border-dashed rounded-2xl p-12 text-center">
               <div className="w-16 h-16 bg-neutral-100 rounded-full flex items-center justify-center mx-auto mb-4 text-neutral-400">
@@ -139,7 +199,6 @@ export default function App() {
           )}
         </section>
 
-        {/* Active Transfers */}
         {transfers.length > 0 && (
           <section>
             <h2 className="text-lg font-medium mb-4">Transfers</h2>
@@ -152,16 +211,16 @@ export default function App() {
                     }`}>
                       {transfer.direction === 'send' ? <FileUp size={20} /> : <FileDown size={20} />}
                     </div>
-                    
+
                     <div className="flex-1 min-w-0">
                       <div className="flex justify-between items-baseline mb-1">
                         <h4 className="text-sm font-medium text-neutral-900 truncate pr-4">{transfer.fileName}</h4>
                         <span className="text-xs text-neutral-500 shrink-0">{formatBytes(transfer.fileSize)}</span>
                       </div>
-                      
+
                       <div className="flex items-center gap-3">
                         <div className="flex-1 h-2 bg-neutral-100 rounded-full overflow-hidden">
-                          <div 
+                          <div
                             className={`h-full rounded-full transition-all duration-300 ${
                               transfer.status === 'failed' || transfer.status === 'cancelled' ? 'bg-red-500' :
                               transfer.status === 'completed' ? 'bg-emerald-500' : 'bg-indigo-500'
@@ -173,12 +232,13 @@ export default function App() {
                           {transfer.progress}%
                         </span>
                       </div>
-                      
+
                       <div className="text-xs text-neutral-500 mt-1 capitalize flex items-center gap-1">
                         {transfer.status === 'pending' && <span className="text-amber-600">Waiting for response...</span>}
                         {transfer.status === 'transferring' && <span className="text-indigo-600">Transferring...</span>}
                         {transfer.status === 'completed' && <span className="text-emerald-600">Completed</span>}
-                        {(transfer.status === 'failed' || transfer.status === 'cancelled') && <span className="text-red-600">Cancelled</span>}
+                        {transfer.status === 'failed' && <span className="text-red-600">Failed</span>}
+                        {transfer.status === 'cancelled' && <span className="text-red-600">Cancelled</span>}
                       </div>
                     </div>
 
@@ -210,15 +270,69 @@ export default function App() {
         )}
       </main>
 
-      {/* Hidden File Input */}
       <input
         type="file"
-        ref={fileInputRef}
-        onChange={handleFileChange}
+        ref={filesInputRef}
+        multiple
+        onChange={event => void handleSelectionChange(event, false)}
+        className="hidden"
+      />
+      <input
+        type="file"
+        ref={configureFolderInput}
+        multiple
+        onChange={event => void handleSelectionChange(event, true)}
         className="hidden"
       />
 
-      {/* Incoming Request Modal */}
+      {selectedPeer && (
+        <div className="fixed inset-0 bg-neutral-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-3xl shadow-xl max-w-md w-full p-6">
+            <div className="flex items-start justify-between gap-4 mb-5">
+              <div>
+                <h3 className="text-xl font-semibold">Send to {selectedPeerName || 'device'}</h3>
+                <p className="text-sm text-neutral-500 mt-1">Choose individual files or a complete folder.</p>
+              </div>
+              <button
+                onClick={() => !isPreparingSelection && setSelectedPeer(null)}
+                className="p-1.5 text-neutral-400 hover:text-neutral-600 hover:bg-neutral-100 rounded-lg"
+                aria-label="Close selection dialog"
+                disabled={isPreparingSelection}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {isPreparingSelection ? (
+              <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-8 text-center">
+                <Loader2 className="animate-spin mx-auto mb-3 text-indigo-600" size={28} />
+                <div className="font-medium">Preparing archive...</div>
+                <p className="text-sm text-neutral-500 mt-1">Large folders may take a moment to package.</p>
+              </div>
+            ) : (
+              <div className="grid sm:grid-cols-2 gap-3">
+                <button
+                  onClick={() => filesInputRef.current?.click()}
+                  className="rounded-2xl border border-neutral-200 p-5 text-left hover:border-indigo-300 hover:bg-indigo-50/50 transition-colors"
+                >
+                  <Files className="text-indigo-600 mb-3" size={28} />
+                  <div className="font-semibold">Select files</div>
+                  <p className="text-sm text-neutral-500 mt-1">Choose one or several files.</p>
+                </button>
+                <button
+                  onClick={() => folderInputRef.current?.click()}
+                  className="rounded-2xl border border-neutral-200 p-5 text-left hover:border-indigo-300 hover:bg-indigo-50/50 transition-colors"
+                >
+                  <FolderUp className="text-indigo-600 mb-3" size={28} />
+                  <div className="font-semibold">Select folder</div>
+                  <p className="text-sm text-neutral-500 mt-1">Preserve its complete structure in a TAR archive.</p>
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {incomingRequest && (
         <div className="fixed inset-0 bg-neutral-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl shadow-xl max-w-sm w-full p-6 animate-in fade-in zoom-in-95 duration-200">
@@ -227,9 +341,9 @@ export default function App() {
             </div>
             <h3 className="text-xl font-semibold text-center mb-2">Incoming File</h3>
             <p className="text-center text-neutral-600 mb-6 text-sm">
-              <span className="font-medium text-neutral-900">{peers.find(p => p.id === incomingRequest.targetPeerId)?.name || 'Someone'}</span> wants to send you:
+              <span className="font-medium text-neutral-900">{peers.find(peer => peer.id === incomingRequest.targetPeerId)?.name || 'Someone'}</span> wants to send you:
             </p>
-            
+
             <div className="bg-neutral-50 rounded-xl p-4 mb-6 flex items-center gap-3 border border-neutral-100">
               <div className="w-10 h-10 bg-white rounded-lg border border-neutral-200 flex items-center justify-center shrink-0">
                 <FileUp size={20} className="text-neutral-400" />
